@@ -10,7 +10,7 @@ import torch.utils.data
 import custom_transforms
 import models
 from utils import tensor2array, save_checkpoint, save_path_formatter, log_output_tensorboard
-
+import pdb
 from loss_functions import photometric_reconstruction_loss, explainability_loss, smooth_loss, blurry_loss
 from loss_functions import compute_depth_errors, compute_pose_errors
 from inverse_warp import *
@@ -77,6 +77,7 @@ parser.add_argument('-f', '--training-output-freq', type=int,
 
 best_error = -1
 n_iter = 0
+gpu_list = [0,1,2]
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
@@ -159,7 +160,6 @@ def main():
     if not output_exp:
         print("=> no mask loss, PoseExpnet will only output pose")
     pose_exp_net = models.PoseExpNet(nb_ref_imgs=args.sequence_length - 1, output_exp=args.mask_loss_weight > 0).to(device)
-
     if args.pretrained_exp_pose:
         print("=> using pre-trained weights for explainabilty and pose net")
         weights = torch.load(args.pretrained_exp_pose)
@@ -175,8 +175,8 @@ def main():
         disp_net.init_weights()
 
     cudnn.benchmark = True
-    disp_net = torch.nn.DataParallel(disp_net)
-    pose_exp_net = torch.nn.DataParallel(pose_exp_net)
+    disp_net = torch.nn.DataParallel(disp_net,device_ids=gpu_list)
+    pose_exp_net = torch.nn.DataParallel(pose_exp_net,device_ids=gpu_list)
 
     print('=> setting adam solver')
 
@@ -273,6 +273,7 @@ def train(args, train_loader, disp_net, pose_exp_net, optimizer, epoch_size, log
     logger.train_bar.update(0)
 
     for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv) in enumerate(train_loader):
+
         log_losses = i > 0 and n_iter % args.print_freq == 0
         log_output = args.training_output_freq > 0 and n_iter % args.training_output_freq == 0
 
@@ -295,8 +296,10 @@ def train(args, train_loader, disp_net, pose_exp_net, optimizer, epoch_size, log
 
         disparities_blurry = disp_net(blurry_img)
         depth_blurry = [1/disp for disp in disparities_blurry]
-        explainability_mask_blurry, pose_blurry = pose_exp_net(blurry_img, blurry = True)
-
+        try:
+            explainability_mask_blurry, pose_blurry = pose_exp_net(target_image=blurry_img, blurry = True)
+        except TypeError:
+            pdb.set_trace()
         loss_1, warped, diff = photometric_reconstruction_loss(tgt_img, ref_imgs, intrinsics,
                                                                depth, explainability_mask, pose,
                                                                args.rotation_mode, args.padding_mode)
