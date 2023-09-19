@@ -1,130 +1,106 @@
+from __future__ import division
 import argparse
+# import scipy.misc
 import numpy as np
-from pebble import ProcessPool
-from tqdm import tqdm
-from path import Path
-from imageio import imwrite
-
+from glob import glob
+from joblib import Parallel, delayed
+import os
+import imageio
 parser = argparse.ArgumentParser()
-parser.add_argument("dataset_dir", metavar='DIR', type=Path,
-                    help='path to original dataset')
-parser.add_argument("--dataset-format", type=str, default='kitti_raw', choices=["kitti_raw", "kitti_odometry", "cityscapes"])
-parser.add_argument("--static-frames", default=None, type=Path,
-                    help="list of imgs to discard for being static, if not set will discard them based on speed \
-                    (careful, on KITTI some frames have incorrect speed)")
-parser.add_argument("--with-depth", action='store_true',
-                    help="If available (e.g. with KITTI), will store depth ground truth along with images, for validation")
-parser.add_argument("--with-pose", action='store_true',
-                    help="If available (e.g. with KITTI), will store pose ground truth along with images, for validation")
-parser.add_argument("--no-train-gt", action='store_true',
-                    help="If selected, will delete ground truth depth to save space")
-parser.add_argument("--dump-root", type=Path, default='dump', help="Where to dump the data")
-parser.add_argument("--height", type=int, default=128, help="image height")
-parser.add_argument("--width", type=int, default=416, help="image width")
-parser.add_argument("--depth-size-ratio", type=int, default=1, help="will divide depth size by that ratio")
-parser.add_argument("--num-threads", type=int, default=4, help="number of threads to use")
-
+parser.add_argument("--dataset_dir", type=str, required=True, help="where the dataset is stored")
+parser.add_argument("--dataset_name", type=str, required=True, choices=["kitti_raw_eigen", "kitti_raw_stereo", "kitti_odom", "cityscapes"])
+parser.add_argument("--dump_root", type=str, required=True, help="Where to dump the data")
+parser.add_argument("--seq_length", type=int, required=True, help="Length of each training sequence")
+parser.add_argument("--img_height", type=int, default=128, help="image height")
+parser.add_argument("--img_width", type=int, default=416, help="image width")
+parser.add_argument("--num_threads", type=int, default=4, help="number of threads to use")
 args = parser.parse_args()
 
+def concat_image_seq(seq):
+    for i, im in enumerate(seq):
+        if i == 0:
+            res = im
+        else:
+            res = np.hstack((res, im))
+    return res
 
-def dump_example(args, scene):
-    scene_list = data_loader.collect_scenes(scene)
-    # print("scene list", scene_list, " for scene ", scene)
-    for scene_data in scene_list:
-        dump_dir = args.dump_root/scene_data['rel_path']
-        dump_dir.makedirs_p()
-        intrinsics = scene_data['intrinsics']
-
-        dump_cam_file = dump_dir/'cam.txt'
-
-        np.savetxt(dump_cam_file, intrinsics)
-        poses_file = dump_dir/'poses.txt'
-        poses = []
-
-        for sample in data_loader.get_scene_imgs(scene_data):
-            img, frame_nb = sample["img"], sample["id"]
-            dump_img_file = dump_dir/'{}.jpg'.format(frame_nb)
-            dump_img_file.parent.makedirs_p()
-            imwrite(dump_img_file, img)
-
-            if "pose" in sample.keys():
-                poses.append(sample["pose"].tolist())
-            if "depth" in sample.keys():
-                dump_depth_file = dump_dir/'{}.npy'.format(frame_nb)
-                np.save(dump_depth_file, sample["depth"])
-        if len(poses) != 0:
-            np.savetxt(poses_file, np.array(poses).reshape(-1, 12), fmt='%.6e')
-
-        if len(dump_dir.files('*.jpg')) < 3:
-            dump_dir.rmtree()
-
+def dump_example(n, args):
+    if n % 2000 == 0:
+        print('Progress %d/%d....' % (n, data_loader.num_train))
+    example = data_loader.get_train_example_with_idx(n)
+    if example == False:
+        return
+    image_seq = concat_image_seq(example['image_seq'])
+    intrinsics = example['intrinsics']
+    fx = intrinsics[0, 0]
+    fy = intrinsics[1, 1]
+    cx = intrinsics[0, 2]
+    cy = intrinsics[1, 2]
+    dump_dir = os.path.join(args.dump_root, example['folder_name'])
+    # if not os.path.isdir(dump_dir):
+    #     os.makedirs(dump_dir, exist_ok=True)
+    try: 
+        os.makedirs(dump_dir)
+    except OSError:
+        if not os.path.isdir(dump_dir):
+            raise
+    dump_img_file = dump_dir + '/%s.jpg' % example['file_name']
+    imageio.imsave(dump_img_file, image_seq.astype(np.uint8))
+    dump_cam_file = dump_dir + '/%s_cam.txt' % example['file_name']
+    with open(dump_cam_file, 'w') as f:
+        f.write('%f,0.,%f,0.,%f,%f,0.,0.,1.' % (fx, cx, fy, cy))
 
 def main():
-    args.dump_root = Path(args.dump_root)
-    args.dump_root.mkdir_p()
+    if not os.path.exists(args.dump_root):
+        os.makedirs(args.dump_root)
 
     global data_loader
+    if args.dataset_name == 'kitti_odom':
+        from kitti.kitti_odom_loader import kitti_odom_loader
+        data_loader = kitti_odom_loader(args.dataset_dir,
+                                        img_height=args.img_height,
+                                        img_width=args.img_width,
+                                        seq_length=args.seq_length)
 
-    if args.dataset_format == 'kitti_raw':
-        from kitti_raw_loader import KittiRawLoader
-        data_loader = KittiRawLoader(args.dataset_dir,
-                                     static_frames_file=args.static_frames,
-                                     img_height=args.height,
-                                     img_width=args.width,
-                                     get_depth=args.with_depth,
-                                     get_pose=args.with_pose,
-                                     depth_size_ratio=args.depth_size_ratio)
+    if args.dataset_name == 'kitti_raw_eigen':
+        from kitti.dataloader_kitti_raw_train import kitti_raw_loader
+        data_loader = kitti_raw_loader(args.dataset_dir,
+                                       split='eigen',
+                                       img_height=args.img_height,
+                                       img_width=args.img_width,
+                                       seq_length=args.seq_length)
 
-    if args.dataset_format == 'kitti_odometry':
-        from kitti_odometry_loader import KittiOdomLoader
-        data_loader = KittiOdomLoader(args.dataset_dir,
-                                      img_height=args.height,
-                                      img_width=args.width,
-                                      get_depth=args.with_depth,
-                                      get_pose=args.with_pose,
-                                      depth_size_ratio=args.depth_size_ratio)
+    if args.dataset_name == 'kitti_raw_stereo':
+        from kitti.kitti_raw_loader import kitti_raw_loader
+        data_loader = kitti_raw_loader(args.dataset_dir,
+                                       split='stereo',
+                                       img_height=args.img_height,
+                                       img_width=args.img_width,
+                                       seq_length=args.seq_length)        
 
-    if args.dataset_format == 'cityscapes':
-        from cityscapes_loader import cityscapes_loader
+    if args.dataset_name == 'cityscapes':
+        from cityscapes.cityscapes_loader import cityscapes_loader
         data_loader = cityscapes_loader(args.dataset_dir,
-                                        img_height=args.height,
-                                        img_width=args.width)
+                                        img_height=args.img_height,
+                                        img_width=args.img_width,
+                                        seq_length=args.seq_length)
 
-    n_scenes = len(data_loader.scenes)
-    print('Found {} potential scenes'.format(n_scenes))
-    print('Retrieving frames')
-    if args.num_threads == 1:
-        for scene in tqdm(data_loader.scenes):
-            dump_example(args, scene)
-    else:
-        with ProcessPool(max_workers=args.num_threads) as pool:
-            tasks = pool.map(dump_example, [args]*n_scenes, data_loader.scenes)
-            try:
-                for _ in tqdm(tasks.result(), total=n_scenes):
-                    pass
-            except KeyboardInterrupt as e:
-                tasks.cancel()
-                raise e
+    Parallel(n_jobs=args.num_threads)(delayed(dump_example)(n, args) for n in range(data_loader.num_train))
 
-    print('Generating train val lists')
+    # Split into train/val
     np.random.seed(8964)
-    # to avoid data snooping, we will make two cameras of the same scene to fall in the same set, train or val
-    subdirs = args.dump_root.dirs()
-    canonic_prefixes = set([subdir.basename()[:-2] for subdir in subdirs])
-    with open(args.dump_root / 'train.txt', 'w') as tf:
-        with open(args.dump_root / 'val.txt', 'w') as vf:
-            for pr in tqdm(canonic_prefixes):
-                corresponding_dirs = args.dump_root.dirs('{}*'.format(pr))
-                if np.random.random() < 0.1:
-                    for s in corresponding_dirs:
-                        vf.write('{}\n'.format(s.name))
-                else:
-                    for s in corresponding_dirs:
-                        tf.write('{}\n'.format(s.name))
-                        if args.with_depth and args.no_train_gt:
-                            for gt_file in s.files('*.npy'):
-                                gt_file.remove_p()
+    subfolders = os.listdir(args.dump_root)
+    with open(args.dump_root + 'train.txt', 'w') as tf:
+        with open(args.dump_root + 'val.txt', 'w') as vf:
+            for s in subfolders:
+                if not os.path.isdir(args.dump_root + '/%s' % s):
+                    continue
+                imfiles = glob(os.path.join(args.dump_root, s, '*.jpg'))
+                frame_ids = [os.path.basename(fi).split('.')[0] for fi in imfiles]
+                for frame in frame_ids:
+                    if np.random.random() < 0.1:
+                        vf.write('%s %s\n' % (s, frame))
+                    else:
+                        tf.write('%s %s\n' % (s, frame))
 
-
-if __name__ == '__main__':
-    main()
+main()
