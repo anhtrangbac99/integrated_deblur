@@ -11,9 +11,9 @@ import custom_transforms
 import models
 from utils import tensor2array, save_checkpoint, save_path_formatter, log_output_tensorboard
 
-from loss_functions import photometric_reconstruction_loss, explainability_loss, smooth_loss
+from loss_functions import photometric_reconstruction_loss, explainability_loss, smooth_loss, blurry_loss
 from loss_functions import compute_depth_errors, compute_pose_errors
-from inverse_warp import pose_vec2mat
+from inverse_warp import *
 from logger import TermLogger, AverageMeter
 from tensorboardX import SummaryWriter
 
@@ -285,7 +285,17 @@ def train(args, train_loader, disp_net, pose_exp_net, optimizer, epoch_size, log
         # compute output
         disparities = disp_net(tgt_img)
         depth = [1/disp for disp in disparities]
-        explainability_mask, pose = pose_exp_net(tgt_img, ref_imgs)
+  
+        depth_refs = []
+        for ref_img in ref_imgs:
+            disparities_refs = disp_net(ref_img)[0]
+            depth_refs.append(1/disparities_refs)
+        explainability_mask, pose = pose_exp_net(tgt_img, ref_imgs=ref_imgs)
+        blurry_img = blurry_image(ref_imgs,depth_refs, pose, intrinsics,args.rotation_mode, args.padding_mode)
+
+        disparities_blurry = disp_net(blurry_img)
+        depth_blurry = [1/disp for disp in disparities_blurry]
+        explainability_mask_blurry, pose_blurry = pose_exp_net(blurry_img, blurry = True)
 
         loss_1, warped, diff = photometric_reconstruction_loss(tgt_img, ref_imgs, intrinsics,
                                                                depth, explainability_mask, pose,
@@ -296,13 +306,19 @@ def train(args, train_loader, disp_net, pose_exp_net, optimizer, epoch_size, log
             loss_2 = 0
         loss_3 = smooth_loss(depth)
 
-        loss = w1*loss_1 + w2*loss_2 + w3*loss_3
+        loss_4,_,_ = blurry_loss(tgt_img, blurry_img, intrinsics, 
+                            depth, explainability_mask_blurry, pose_blurry,
+                            args.rotation_mode, args.padding_mode)
+
+        loss = w1*loss_1 + w2*loss_2 + w3*loss_3 + loss_4
 
         if log_losses:
             tb_writer.add_scalar('photometric_error', loss_1.item(), n_iter)
             if w2 > 0:
                 tb_writer.add_scalar('explanability_loss', loss_2.item(), n_iter)
             tb_writer.add_scalar('disparity_smoothness_loss', loss_3.item(), n_iter)
+            tb_writer.add_scalar('blurry_loss',loss_4.item(),n_iter)
+
             tb_writer.add_scalar('total_loss', loss.item(), n_iter)
 
         if log_output:
@@ -324,7 +340,7 @@ def train(args, train_loader, disp_net, pose_exp_net, optimizer, epoch_size, log
 
         with open(args.save_path/args.log_full, 'a') as csvfile:
             writer = csv.writer(csvfile, delimiter='\t')
-            writer.writerow([loss.item(), loss_1.item(), loss_2.item() if w2 > 0 else 0, loss_3.item()])
+            writer.writerow([loss.item(), loss_1.item(), loss_2.item() if w2 > 0 else 0, loss_3.item(), loss_4.item()])
         logger.train_bar.update(i+1)
         if i % args.print_freq == 0:
             logger.train_writer.write('Train: Time {} Data {} Loss {}'.format(batch_time, data_time, losses))

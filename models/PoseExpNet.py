@@ -26,6 +26,7 @@ class PoseExpNet(nn.Module):
         self.output_exp = output_exp
 
         conv_planes = [16, 32, 64, 128, 256, 256, 256]
+        self.conv1_blurry = conv(3, conv_planes[0], kernel_size=7)
         self.conv1 = conv(3*(1+self.nb_ref_imgs), conv_planes[0], kernel_size=7)
         self.conv2 = conv(conv_planes[0], conv_planes[1], kernel_size=5)
         self.conv3 = conv(conv_planes[1], conv_planes[2])
@@ -34,6 +35,7 @@ class PoseExpNet(nn.Module):
         self.conv6 = conv(conv_planes[4], conv_planes[5])
         self.conv7 = conv(conv_planes[5], conv_planes[6])
 
+        self.pose_pred_blurry = nn.Conv2d(conv_planes[6], 6, kernel_size=1, padding=0)
         self.pose_pred = nn.Conv2d(conv_planes[6], 6*self.nb_ref_imgs, kernel_size=1, padding=0)
 
         if self.output_exp:
@@ -49,6 +51,12 @@ class PoseExpNet(nn.Module):
             self.predict_mask2 = nn.Conv2d(upconv_planes[3], self.nb_ref_imgs, kernel_size=3, padding=1)
             self.predict_mask1 = nn.Conv2d(upconv_planes[4], self.nb_ref_imgs, kernel_size=3, padding=1)
 
+            self.predict_mask4_blurry = nn.Conv2d(upconv_planes[1], 1, kernel_size=3, padding=1)
+            self.predict_mask3_blurry = nn.Conv2d(upconv_planes[2], 1, kernel_size=3, padding=1)
+            self.predict_mask2_blurry = nn.Conv2d(upconv_planes[3], 1, kernel_size=3, padding=1)
+            self.predict_mask1_blurry = nn.Conv2d(upconv_planes[4], 1, kernel_size=3, padding=1)
+
+
     def init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
@@ -56,12 +64,19 @@ class PoseExpNet(nn.Module):
                 if m.bias is not None:
                     zeros_(m.bias)
 
-    def forward(self, target_image, ref_imgs):
-        assert(len(ref_imgs) == self.nb_ref_imgs)
-        input = [target_image]
-        input.extend(ref_imgs)
-        input = torch.cat(input, 1)
-        out_conv1 = self.conv1(input)
+    def forward(self, target_image, ref_imgs = None,blurry=False):
+        if not blurry:
+            assert(len(ref_imgs) == self.nb_ref_imgs)
+        if ref_imgs is not None:
+            input = [target_image]
+            input.extend(ref_imgs)
+            input = torch.cat(input, 1)
+            out_conv1 = self.conv1(input)
+
+        else:
+            input = target_image
+            out_conv1 = self.conv1_blurry(input)
+
         out_conv2 = self.conv2(out_conv1)
         out_conv3 = self.conv3(out_conv2)
         out_conv4 = self.conv4(out_conv3)
@@ -69,9 +84,14 @@ class PoseExpNet(nn.Module):
         out_conv6 = self.conv6(out_conv5)
         out_conv7 = self.conv7(out_conv6)
 
-        pose = self.pose_pred(out_conv7)
-        pose = pose.mean(3).mean(2)
-        pose = 0.01 * pose.view(pose.size(0), self.nb_ref_imgs, 6)
+        if blurry:
+            pose = self.pose_pred_blurry(out_conv7)
+            pose = pose.mean(3).mean(2)
+            pose = 0.01 * pose.view(pose.size(0), 1, 6)
+        else:
+            pose = self.pose_pred(out_conv7)
+            pose = pose.mean(3).mean(2)
+            pose = 0.01 * pose.view(pose.size(0), self.nb_ref_imgs, 6)
 
         if self.output_exp:
             out_upconv5 = self.upconv5(out_conv5  )[:, :, 0:out_conv4.size(2), 0:out_conv4.size(3)]
@@ -80,10 +100,16 @@ class PoseExpNet(nn.Module):
             out_upconv2 = self.upconv2(out_upconv3)[:, :, 0:out_conv1.size(2), 0:out_conv1.size(3)]
             out_upconv1 = self.upconv1(out_upconv2)[:, :, 0:input.size(2), 0:input.size(3)]
 
-            exp_mask4 = sigmoid(self.predict_mask4(out_upconv4))
-            exp_mask3 = sigmoid(self.predict_mask3(out_upconv3))
-            exp_mask2 = sigmoid(self.predict_mask2(out_upconv2))
-            exp_mask1 = sigmoid(self.predict_mask1(out_upconv1))
+            if blurry:
+                exp_mask4 = sigmoid(self.predict_mask4_blurry(out_upconv4))
+                exp_mask3 = sigmoid(self.predict_mask3_blurry(out_upconv3))
+                exp_mask2 = sigmoid(self.predict_mask2_blurry(out_upconv2))
+                exp_mask1 = sigmoid(self.predict_mask1_blurry(out_upconv1))
+            else:
+                exp_mask4 = sigmoid(self.predict_mask4(out_upconv4))
+                exp_mask3 = sigmoid(self.predict_mask3(out_upconv3))
+                exp_mask2 = sigmoid(self.predict_mask2(out_upconv2))
+                exp_mask1 = sigmoid(self.predict_mask1(out_upconv1))
         else:
             exp_mask4 = None
             exp_mask3 = None

@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from inverse_warp import inverse_warp
+from inverse_warp import *
 
 
 def photometric_reconstruction_loss(tgt_img, ref_imgs, intrinsics,
@@ -87,6 +87,98 @@ def smooth_loss(pred_map):
         loss += (dx2.abs().mean() + dxdy.abs().mean() + dydx.abs().mean() + dy2.abs().mean())*weight
         weight /= 2.3  # don't ask me why it works better
     return loss
+
+def blurry_loss(target_image, blurry_image, intrinsics, depth, explainability_mask, pose,
+                                    rotation_mode='euler', padding_mode='zeros'):
+
+    def one_scale(depth, explainability_mask):
+        assert(explainability_mask is None or depth.size()[2:] == explainability_mask.size()[2:])
+
+        reconstruction_loss = 0
+        b, _, h, w = depth.size()
+        downscale = target_image.size(2)/h
+
+        tgt_img_scaled = F.interpolate(target_image, (h, w), mode='area')
+        blr_img_scaled = F.interpolate(blurry_image, (h, w), mode='area')
+        intrinsics_scaled = torch.cat((intrinsics[:, 0:2]/downscale, intrinsics[:, 2:]), dim=1)
+
+        ref_img_warped, valid_points = inverse_warp(blr_img_scaled, depth[:,0], pose[:,0],
+                                                    intrinsics_scaled,
+                                                    rotation_mode, padding_mode)
+        diff = (tgt_img_scaled - ref_img_warped) * valid_points.unsqueeze(1).float()
+
+        if explainability_mask is not None:
+            diff = diff * explainability_mask[:,:].expand_as(diff)
+
+        reconstruction_loss += diff.abs().mean()
+        assert((reconstruction_loss == reconstruction_loss).item() == 1)
+
+        return reconstruction_loss, ref_img_warped[0], diff[0]
+
+    if type(explainability_mask) not in [tuple, list]:
+        explainability_mask = [explainability_mask]
+    if type(depth) not in [list, tuple]:
+        depth = [depth]
+
+    total_loss = 0
+    for d, mask in zip(depth, explainability_mask):
+        loss, warped, diff = one_scale(d, mask)
+        total_loss += loss
+        
+    return total_loss, warped, diff    
+
+def create_blurry(tgt_img, ref_imgs, intrinsics,
+                                    depth, explainability_mask, pose,
+                                    rotation_mode='euler', padding_mode='zeros'):
+    def one_scale(depth, explainability_mask):
+        assert(explainability_mask is None or depth.size()[2:] == explainability_mask.size()[2:])
+        assert(pose.size(1) == len(ref_imgs))
+
+        reconstruction_loss = 0
+        b, _, h, w = depth.size()
+        downscale = tgt_img.size(2)/h
+
+        tgt_img_scaled = F.interpolate(tgt_img, (h, w), mode='area')
+        ref_imgs_scaled = [F.interpolate(ref_img, (h, w), mode='area') for ref_img in ref_imgs]
+        intrinsics_scaled = torch.cat((intrinsics[:, 0:2]/downscale, intrinsics[:, 2:]), dim=1)
+
+        warped_imgs = []
+        diff_maps = []
+
+        for i, ref_img in enumerate(ref_imgs_scaled):
+            current_pose = pose[:, i]
+
+            ref_img_warped, valid_points = inverse_warp(ref_img, depth[:,0], current_pose,
+                                                        intrinsics_scaled,
+                                                        rotation_mode, padding_mode)
+            diff = (tgt_img_scaled - ref_img_warped) * valid_points.unsqueeze(1).float()
+
+            if explainability_mask is not None:
+                diff = diff * explainability_mask[:,i:i+1].expand_as(diff)
+
+            reconstruction_loss += diff.abs().mean()
+            assert((reconstruction_loss == reconstruction_loss).item() == 1)
+
+            warped_imgs.append(ref_img_warped[0])
+            diff_maps.append(diff[0])
+
+        return reconstruction_loss, warped_imgs, diff_maps
+
+    warped_results, diff_results = [], []
+    if type(explainability_mask) not in [tuple, list]:
+        explainability_mask = [explainability_mask]
+    if type(depth) not in [list, tuple]:
+        depth = [depth]
+
+    total_loss = 0
+    for d, mask in zip(depth, explainability_mask):
+        loss, warped, diff = one_scale(d, mask)
+        total_loss += loss
+        warped_results.append(warped)
+        diff_results.append(diff)
+    return total_loss, warped_results, diff_results
+
+
 
 
 @torch.no_grad()
