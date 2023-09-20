@@ -7,7 +7,7 @@ import numpy as np
 from path import Path
 import argparse
 from tqdm import tqdm
-
+import pdb
 from models import DispNetS
 from utils import tensor2array
 
@@ -26,10 +26,10 @@ parser.add_argument("--dataset-dir", default='.', type=str, help="Dataset direct
 parser.add_argument("--output-dir", default='output', type=str, help="Output directory")
 
 parser.add_argument("--img-exts", default=['png', 'jpg', 'bmp'], nargs='*', type=str, help="images extensions to glob")
-
-device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-
-
+try:
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+except:
+    pdb.set_trace()
 @torch.no_grad()
 def main():
     args = parser.parse_args()
@@ -76,7 +76,7 @@ def main():
             imsave(output_dir/'{}_disp{}'.format(file_name, file_ext), np.transpose(disp, (1,2,0)))
         if args.output_depth:
             depth = 1/output
-            depth = (255*tensor2array(depth, max_value=10, colormap='rainbow')).astype(np.uint8)
+            depth = (255*tensor2array(depth, max_value=None, colormap='rainbow')).astype(np.uint8)
             imsave(output_dir/'{}_depth{}'.format(file_name, file_ext), np.transpose(depth, (1,2,0)))
 
 
